@@ -226,13 +226,14 @@ idf_component_register(SRCS ${app_sources})
 
 
 def get_cmake_code_model(src_dir, build_dir, extra_args=None):
+    os.makedirs(build_dir, exist_ok=True)
     cmake_api_dir = os.path.join(build_dir, ".cmake", "api", "v1")
     cmake_api_query_dir = os.path.join(cmake_api_dir, "query")
     cmake_api_reply_dir = os.path.join(cmake_api_dir, "reply")
     query_file = os.path.join(cmake_api_query_dir, "codemodel-v2")
 
     if not os.path.isfile(query_file):
-        os.makedirs(os.path.dirname(query_file))
+        os.makedirs(os.path.dirname(query_file), exist_ok=True)
         open(query_file, "a").close()  # create an empty file
 
     if not is_proper_idf_project():
@@ -848,6 +849,7 @@ def RunMenuconfig(target, source, env):
 
 
 def run_cmake(src_dir, build_dir, extra_args=None):
+    os.makedirs(build_dir, exist_ok=True)
     cmd = [
         os.path.join(platform.get_package_dir("tool-cmake") or "", "bin", "cmake"),
         "-S",
