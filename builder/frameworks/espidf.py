@@ -798,14 +798,17 @@ def compile_source_files(
             preserve_source_file_extension = board.get(
                 "build.esp-idf.preserve_source_file_extension", "yes"
             ) == "yes"
+            target_path = (
+                obj_path if preserve_source_file_extension else os.path.splitext(obj_path)[0]
+            ) + ".o"
+            os.makedirs(
+                os.path.dirname(build_envs[compile_group_idx].subst(target_path)),
+                exist_ok=True,
+            )
 
             objects.append(
                 build_envs[compile_group_idx].StaticObject(
-                    target=(
-                        obj_path
-                        if preserve_source_file_extension
-                        else os.path.splitext(obj_path)[0]
-                    ) + ".o",
+                    target=target_path,
                     source=os.path.realpath(src_path),
                 )
             )
