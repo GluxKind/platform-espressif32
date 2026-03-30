@@ -1204,11 +1204,13 @@ def get_framework_version():
             # If found all three parts of the version
             return ".".join([match[1] for match in matches])
 
-    pkg = platform.get_package("framework-espidf")
-    version = get_original_version(str(pkg.metadata.version.truncate()))
+    # Prefer the version embedded in the framework tree itself. For custom
+    # PlatformIO packages, the package version often encodes registry
+    # compatibility rather than the actual ESP-IDF major/minor version.
+    version = _extract_from_cmake_version_file()
     if not version:
-        # Fallback value extracted directly from the cmake version file
-        version = _extract_from_cmake_version_file()
+        pkg = platform.get_package("framework-espidf")
+        version = get_original_version(str(pkg.metadata.version.truncate()))
         if not version:
             version = "0.0.0"
 
