@@ -34,6 +34,7 @@ import semantic_version
 
 from SCons.Script import (
     ARGUMENTS,
+    AlwaysBuild,
     Builder,
     COMMAND_LINE_TARGETS,
     DefaultEnvironment,
@@ -735,7 +736,14 @@ def prepare_build_envs(config, default_env, debug_allowed=True):
         build_env = default_env.Clone()
         build_env.SetOption("implicit_cache", 1)
         for cc in compile_commands:
-            build_flags = cc.get("fragment", "").strip("\" ")
+            raw_build_flags = cc.get("fragment", "")
+            build_flags = raw_build_flags.strip()
+            if (
+                build_flags.startswith('"')
+                and build_flags.endswith('"')
+                and not build_flags.startswith('@"')
+            ):
+                build_flags = build_flags[1:-1]
             if not build_flags.startswith("-D"):
                 if build_flags.startswith("-include") and ".." in build_flags:
                     source_index = cg.get("sourceIndexes")[0]
@@ -918,6 +926,46 @@ def build_bootloader(sdk_config, bootloader_offset):
         )
         env.Exit(1)
 
+    framework_version = [int(v) for v in get_framework_version().split(".")]
+    if framework_version[:1] >= [6]:
+        bootloader_bin = os.path.join(BUILD_DIR, "bootloader.bin")
+        nested_bootloader_bin = os.path.join(BUILD_DIR, "bootloader", "bootloader.bin")
+        cmake_bin = os.path.join(platform.get_package_dir("tool-cmake"), "bin", "cmake")
+        bootloader_binary = env.Command(
+            bootloader_bin,
+            [os.path.join(BUILD_DIR, "bootloader", "build.ninja"), SDKCONFIG_PATH],
+            env.VerboseAction(
+                " ".join(
+                    [
+                        "cd",
+                        fs.to_unix_path(os.path.join(BUILD_DIR, "bootloader")),
+                        "&&",
+                        "env",
+                        "IDF_PATH=%s" % fs.to_unix_path(FRAMEWORK_DIR),
+                        cmake_bin,
+                        "--build",
+                        ".",
+                        "--target",
+                        "gen_bootloader_binary",
+                        "&&",
+                        cmake_bin,
+                        "-E",
+                        "copy_if_different",
+                        fs.to_unix_path(nested_bootloader_bin),
+                        fs.to_unix_path(bootloader_bin),
+                    ]
+                ),
+                "Building bootloader image $TARGET",
+            ),
+        )
+        env["ESP32_BOOTLOADER_IMAGE_NAME"] = "bootloader"
+        return bootloader_binary[0]
+
+    bootloader_env = env.Clone()
+    components_map = get_components_map(
+        target_configs, ["STATIC_LIBRARY", "OBJECT_LIBRARY"]
+    )
+
     bootloader_env = env.Clone()
     components_map = get_components_map(
         target_configs, ["STATIC_LIBRARY", "OBJECT_LIBRARY"]
@@ -948,6 +996,71 @@ def build_bootloader(sdk_config, bootloader_offset):
             "BOOTLOADER_COMPILER_OPTIMIZATION_DEBUG", False),
     )
     link_args = extract_link_args(elf_config)
+    bootloader_ld = None
+    framework_version = [int(v) for v in get_framework_version().split(".")]
+    if framework_version[:1] >= [6]:
+        bootloader_ld_source = os.path.join(
+            FRAMEWORK_DIR,
+            "components",
+            "bootloader",
+            "subproject",
+            "main",
+            "ld",
+            idf_variant,
+            "bootloader.ld.in",
+        )
+        bootloader_ld_target = os.path.join(
+            BUILD_DIR, "bootloader", "ld", "bootloader.ld"
+        )
+        bootloader_ld = env.Command(
+            bootloader_ld_target,
+            bootloader_ld_source,
+            env.VerboseAction(
+                " ".join(
+                    [
+                        os.path.join(
+                            platform.get_package_dir("tool-cmake"),
+                            "bin",
+                            "cmake",
+                        ),
+                        "-DCC=%s"
+                        % os.path.join(
+                            TOOLCHAIN_DIR,
+                            "bin",
+                            env.subst("$CC"),
+                        ),
+                        "-DSOURCE=$SOURCE",
+                        "-DTARGET=$TARGET",
+                        '-DCFLAGS=-I"%s" -I"%s"'
+                        % (
+                            os.path.join(BUILD_DIR, "bootloader", "config"),
+                            os.path.join(
+                                FRAMEWORK_DIR,
+                                "components",
+                                "bootloader",
+                                "subproject",
+                                "main",
+                                "ld",
+                            ),
+                        ),
+                        "-P",
+                        os.path.join(
+                            FRAMEWORK_DIR,
+                            "tools",
+                            "cmake",
+                            "linker_script_preprocessor.cmake",
+                        ),
+                    ]
+                ),
+                "Generating bootloader LD script $TARGET",
+            ),
+        )
+        link_args["LINKFLAGS"] = [
+            fs.to_unix_path(bootloader_ld_target)
+            if flag == "bootloader.ld"
+            else flag
+            for flag in link_args["LINKFLAGS"]
+        ]
     extra_flags = filter_args(link_args["LINKFLAGS"], ["-T", "-u"])
     link_args["LINKFLAGS"] = sorted(
         list(set(link_args["LINKFLAGS"]) - set(extra_flags))
@@ -963,11 +1076,14 @@ def build_bootloader(sdk_config, bootloader_offset):
     )
 
     bootloader_image_name = "bootloader"
+    bootloader_program = bootloader_env.Program(
+        os.path.join("$BUILD_DIR", "bootloader.elf"), bootloader_libs
+    )
+    if bootloader_ld:
+        bootloader_env.Depends(bootloader_program, bootloader_ld)
     bootloader_binary = bootloader_env.ElfToBin(
         os.path.join("$BUILD_DIR", bootloader_image_name),
-        bootloader_env.Program(
-            os.path.join("$BUILD_DIR", "bootloader.elf"), bootloader_libs
-        ),
+        bootloader_program,
     )
 
     if env.get("PIO_ESP32_SIGNATURE_REQUIRED", False) or env.get(
@@ -1185,6 +1301,49 @@ def get_app_partition_offset(pt_table, pt_offset):
 
 
 def preprocess_linker_file(src_ld_script, target_ld_script):
+    framework_version = [int(v) for v in get_framework_version().split(".")]
+    if framework_version[:1] >= [6]:
+        return env.Command(
+            target_ld_script,
+            src_ld_script,
+            env.VerboseAction(
+                " ".join(
+                    [
+                        os.path.join(
+                            platform.get_package_dir("tool-cmake"),
+                            "bin",
+                            "cmake",
+                        ),
+                        "-DCC=%s"
+                        % os.path.join(
+                            TOOLCHAIN_DIR,
+                            "bin",
+                            "$CC",
+                        ),
+                        "-DSOURCE=$SOURCE",
+                        "-DTARGET=$TARGET",
+                        '"-DCFLAGS=-I\"%s\" -I\"%s\""'
+                        % (
+                            os.path.join(BUILD_DIR, "config"),
+                            os.path.join(
+                                FRAMEWORK_DIR,
+                                "components",
+                                "esp_system",
+                                "ld",
+                            ),
+                        ),
+                        "-P",
+                        os.path.join(
+                            FRAMEWORK_DIR,
+                            "tools",
+                            "cmake",
+                            "linker_script_preprocessor.cmake",
+                        ),
+                    ]
+                ),
+                "Generating LD script $TARGET",
+            ),
+        )
     return env.Command(
         target_ld_script,
         src_ld_script,
@@ -1224,9 +1383,54 @@ def preprocess_linker_file(src_ld_script, target_ld_script):
     )
 
 
+def _build_program_idf6(env):
+    env.ProcessProgramDeps()
+    env.ProcessCompileDbToolchainOption()
+    env.ProcessProjectDeps()
+
+    if env.get("LDSCRIPT_PATH") and not any("-Wl,-T" in f for f in env["LINKFLAGS"]):
+        env.Prepend(LINKFLAGS=["-T", env.subst("$LDSCRIPT_PATH")])
+
+    if (
+        env.get("LIBS")
+        and env.GetCompilerType() == "gcc"
+        and (env.PioPlatform().is_embedded() or not sys_platform.system() == "Darwin")
+    ):
+        env.Prepend(_LIBFLAGS="-Wl,--start-group ")
+        env.Append(_LIBFLAGS=" -Wl,--end-group")
+
+    native_app_build = env.get("PIO_IDF6_NATIVE_APP_BUILD")
+    if native_app_build:
+        program = env.Command(
+            env.subst("$PROGPATH"),
+            native_app_build["deps"],
+            env.VerboseAction(
+                native_app_build["cmd"],
+                "Building native ESP-IDF app $TARGET",
+            ),
+        )
+    else:
+        program = env.Program(env.subst("$PROGPATH"), env["PIOBUILDFILES"])
+    env.Replace(PIOMAINPROG=program)
+
+    AlwaysBuild(
+        env.Alias(
+            "checkprogsize",
+            program,
+            env.VerboseAction(env.CheckUploadSize, "Checking size $PIOMAINPROG"),
+        )
+    )
+
+    print("Building in %s mode" % env["BUILD_TYPE"])
+
+    return program
+
+
 def generate_mbedtls_bundle(sdk_config):
     bundle_path = os.path.join("$BUILD_DIR", "x509_crt_bundle")
-    if os.path.isfile(env.subst(bundle_path)):
+    bundle_data = env.subst(bundle_path)
+    bundle_asm = env.subst("%s.S" % bundle_path)
+    if os.path.isfile(bundle_data) and os.path.isfile(bundle_asm):
         return
 
     default_crt_dir = os.path.join(
@@ -1321,7 +1525,7 @@ def install_python_deps():
         "pyparsing": ">=3.1.0,<4" if IDF5 else ">=2.0.3,<2.4.0",
         "idf-component-manager": "~=2.2" if IDF5 else "~=1.0",
         "esp-idf-kconfig": "~=2.5.0",
-        "pydantic": "~=2.12.0"
+        "pydantic": "<2.12.0"
     }
 
     if not IDF5:
@@ -1995,6 +2199,44 @@ env.Prepend(
     LINKFLAGS=extra_flags,
     LIBS=libs,
 )
+
+framework_version = [int(v) for v in get_framework_version().split(".")]
+if framework_version[:1] >= [6]:
+    native_app_elf = os.path.join(BUILD_DIR, elf_config["artifacts"][0]["path"])
+    pio_progpath = fs.to_unix_path(os.path.abspath(env.subst("$PROGPATH")))
+    cmake_bin = os.path.join(platform.get_package_dir("tool-cmake"), "bin", "cmake")
+    native_env = ["IDF_PATH=%s" % fs.to_unix_path(FRAMEWORK_DIR)]
+    cspot_vendor_python = env["ENV"].get("CSPOT_VENDOR_PYTHON_EXECUTABLE")
+    if cspot_vendor_python:
+        native_env.append(
+            "CSPOT_VENDOR_PYTHON_EXECUTABLE=%s"
+            % fs.to_unix_path(cspot_vendor_python)
+        )
+        native_env.append("PYTHON=%s" % fs.to_unix_path(cspot_vendor_python))
+    env["PIO_IDF6_NATIVE_APP_BUILD"] = {
+        "deps": [os.path.join(BUILD_DIR, "build.ninja"), SDKCONFIG_PATH],
+        "cmd": " ".join(
+                [
+                    "cd",
+                    fs.to_unix_path(BUILD_DIR),
+                    "&&",
+                    "env",
+                    *native_env,
+                    cmake_bin,
+                    "--build",
+                    ".",
+                    "--target",
+                "all",
+                "&&",
+                cmake_bin,
+                "-E",
+                "copy_if_different",
+                fs.to_unix_path(native_app_elf),
+                pio_progpath,
+            ]
+        ),
+    }
+    env.AddMethod(_build_program_idf6, "BuildProgram")
 
 # In Secure Boot the bootloader image is only uploaded if
 # a corresponding option is enabled
