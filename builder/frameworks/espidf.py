@@ -60,12 +60,10 @@ board = env.BoardConfig()
 mcu = board.get("build.mcu", "esp32")
 idf_variant = mcu.lower()
 
+_framework_semver = int(platform.get_package_version("framework-espidf").split(".")[1])
 # Required until Arduino switches to v5
-IDF5 = (
-    platform.get_package_version("framework-espidf")
-    .split(".")[1]
-    .startswith("5")
-)
+IDF5 = 50000 <= _framework_semver < 60000
+IDF6 = _framework_semver >= 60000
 IDF_ENV_VERSION = "1.0.0"
 FRAMEWORK_DIR = platform.get_package_dir("framework-espidf")
 TOOLCHAIN_DIR = platform.get_package_dir(
@@ -1550,17 +1548,16 @@ def install_python_deps():
         # https://github.com/platformio/platformio-core/issues/4614
         "urllib3": "<2",
         # https://github.com/platformio/platform-espressif32/issues/635
-        "cryptography": "~=44.0.0" if IDF5 else ">=2.1.4,<35.0.0",
-        "pyparsing": ">=3.1.0,<4" if IDF5 else ">=2.0.3,<2.4.0",
-        "idf-component-manager": "~=2.2" if IDF5 else "~=3.0",
-        "esp-idf-kconfig": "~=2.5.0",
+        "cryptography": "~=44.0.0" if (IDF5 or IDF6) else ">=2.1.4,<35.0.0",
+        "pyparsing": ">=3.1.0,<4" if (IDF5 or IDF6) else ">=2.0.3,<2.4.0",
+        "idf-component-manager": "~=2.2" if IDF5 else ("~=3.0" if IDF6 else "~=1.0"),
+        "esp-idf-kconfig": "~=2.5.0" if IDF5 else (">=3.7,<4" if IDF6 else ">=1.4.2,<2.0.0"),
         "pydantic": "<2.12.0"
     }
 
-    if not IDF5:
+    if not (IDF5 or IDF6):
         deps["kconfiglib"] = "~=13.7.1"
         deps["future"] = ">=0.18.3"
-        deps["esp-idf-kconfig"] = ">=1.4.2,<2.0.0"
 
     if sys_platform.system() == "Darwin" and "arm" in sys_platform.machine().lower():
         deps["chardet"] = ">=3.0.2,<4"
@@ -1597,7 +1594,7 @@ def install_python_deps():
 
         # A special "esp-windows-curses" python package is required on Windows
         # for Menuconfig on IDF <5
-        if not IDF5 and "esp-windows-curses" not in installed_packages:
+        if not (IDF5 or IDF6) and "esp-windows-curses" not in installed_packages:
             env.Execute(
                 env.VerboseAction(
                     '"%s" -m pip install "file://%s/tools/kconfig_new/esp-windows-curses"'
