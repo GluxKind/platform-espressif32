@@ -196,6 +196,62 @@ def _to_unix_slashes(path):
     return path.replace("\\", "/")
 
 
+def _is_native_espidf_v6_project(env):
+    frameworks = env.get("PIOFRAMEWORK") or []
+    if frameworks != ["espidf"]:
+        return False
+
+    framework_pkg_version = env.PioPlatform().get_package_version("framework-espidf")
+    if not framework_pkg_version:
+        return False
+
+    try:
+        major_marker = int(str(framework_pkg_version).split(".")[1])
+    except (IndexError, TypeError, ValueError):
+        return False
+
+    return major_marker >= 60000
+
+
+def _build_native_espidf_v6_program(env):
+    env.ProcessProgramDeps()
+    env.ProcessCompileDbToolchainOption()
+    env.ProcessProjectDeps()
+
+    if env.get("LDSCRIPT_PATH") and not any("-Wl,-T" in f for f in env["LINKFLAGS"]):
+        env.Prepend(LINKFLAGS=["-T", env.subst("$LDSCRIPT_PATH")])
+
+    if env.get("LIBS") and env.GetCompilerType() == "gcc":
+        env.Prepend(_LIBFLAGS="-Wl,--start-group ")
+        env.Append(_LIBFLAGS=" -Wl,--end-group")
+
+    native_app_build = env.get("PIO_IDF6_NATIVE_APP_BUILD")
+    if native_app_build:
+        program = env.Command(
+            env.subst("$PROGPATH"),
+            native_app_build["deps"],
+            env.VerboseAction(
+                native_app_build["cmd"],
+                "Building native ESP-IDF app $TARGET",
+            ),
+        )
+    else:
+        program = env.Program(env.subst("$PROGPATH"), env["PIOBUILDFILES"])
+
+    env.Replace(PIOMAINPROG=program)
+    AlwaysBuild(
+        env.Alias(
+            "checkprogsize",
+            program,
+            env.VerboseAction(env.CheckUploadSize, "Checking size $PIOMAINPROG"),
+        )
+    )
+
+    print("Building in %s mode" % env["BUILD_TYPE"])
+
+    return program
+
+
 #
 # Filesystem helpers
 #
@@ -367,7 +423,10 @@ if "nobuild" in COMMAND_LINE_TARGETS:
     else:
         target_firm = join("$BUILD_DIR", "${PROGNAME}.bin")
 else:
-    target_elf = env.BuildProgram()
+    if _is_native_espidf_v6_project(env):
+        target_elf = _build_native_espidf_v6_program(env)
+    else:
+        target_elf = env.BuildProgram()
     if set(["buildfs", "uploadfs", "uploadfsota"]) & set(COMMAND_LINE_TARGETS):
         target_firm = env.DataToBin(
             join("$BUILD_DIR", "${ESP32_FS_IMAGE_NAME}"), "$PROJECT_DATA_DIR"
