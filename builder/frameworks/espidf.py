@@ -711,6 +711,44 @@ def _fix_component_relative_include(config, build_flags, source_index):
     return build_flags
 
 
+def _expand_response_file_refs(fragment):
+    """Expand GCC @"file" response-file references inlined by IDF 6 toolchain.
+
+    IDF 6 stores base compiler flags in response files (e.g. toolchain/cflags)
+    and references them via CMAKE_C_FLAGS = @"/path/toolchain/cflags".  The CMake
+    code-model passes these through verbatim, but SCons/ParseFlags does not
+    understand the @-file syntax.  This helper reads the referenced file and
+    splices its contents back into the fragment string.
+    """
+    result_parts = []
+    rest = fragment
+    while rest:
+        # Look for @"..." pattern
+        at_pos = rest.find('@"')
+        if at_pos == -1:
+            result_parts.append(rest)
+            break
+        # Keep everything before the @
+        result_parts.append(rest[:at_pos])
+        # Find the closing quote
+        close_pos = rest.find('"', at_pos + 2)
+        if close_pos == -1:
+            # Malformed – keep as-is
+            result_parts.append(rest[at_pos:])
+            break
+        resp_path = rest[at_pos + 2:close_pos]
+        rest = rest[close_pos + 1:]
+        if os.path.isfile(resp_path):
+            with open(resp_path) as fh:
+                result_parts.append(fh.read().replace("\n", " "))
+        else:
+            # File not found – drop the reference silently (matches CMake
+            # behaviour when building from a clean state before the first
+            # configure has populated the toolchain directory).
+            pass
+    return " ".join(result_parts).strip()
+
+
 def prepare_build_envs(config, default_env, debug_allowed=True):
     build_envs = []
     target_compile_groups = config.get("compileGroups", [])
@@ -737,10 +775,11 @@ def prepare_build_envs(config, default_env, debug_allowed=True):
         for cc in compile_commands:
             raw_build_flags = cc.get("fragment", "")
             build_flags = raw_build_flags.strip()
+            if '@"' in build_flags:
+                build_flags = _expand_response_file_refs(build_flags)
             if (
                 build_flags.startswith('"')
                 and build_flags.endswith('"')
-                and not build_flags.startswith('@"')
             ):
                 build_flags = build_flags[1:-1]
             if not build_flags.startswith("-D"):
