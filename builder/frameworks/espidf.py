@@ -65,8 +65,30 @@ _framework_semver = int(platform.get_package_version("framework-espidf").split("
 IDF5 = 50000 <= _framework_semver < 60000
 IDF6 = _framework_semver >= 60000
 IDF_ENV_VERSION = "1.0.0"
-FRAMEWORK_DIR = platform.get_package_dir("framework-espidf")
-TOOLCHAIN_DIR = platform.get_package_dir(
+def _resolve_package_dir(pkg_name):
+    pkg_dir = platform.get_package_dir(pkg_name)
+    if not pkg_dir:
+        for pkg in platform.pm.get_installed():
+            if pkg.metadata and pkg.metadata.name == pkg_name:
+                pkg_dir = pkg.path
+                break
+    if not pkg_dir:
+        raise UserWarning(
+            "Package '%s' is not installed. Try `pio pkg install`." % pkg_name
+        )
+    if "@" in os.path.basename(pkg_dir):
+        sanitized = os.path.join(
+            os.path.dirname(pkg_dir),
+            os.path.basename(pkg_dir).replace("@", "-"),
+        )
+        if not os.path.isdir(sanitized):
+            os.rename(pkg_dir, sanitized)
+        pkg_dir = sanitized
+    return pkg_dir
+
+
+FRAMEWORK_DIR = _resolve_package_dir("framework-espidf")
+TOOLCHAIN_DIR = _resolve_package_dir(
     "toolchain-riscv32-esp"
     if mcu in ("esp32c3", "esp32c6")
     else (
