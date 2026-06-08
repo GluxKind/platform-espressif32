@@ -235,6 +235,13 @@ def _build_native_espidf_v6_program(env):
                 "Building native ESP-IDF app $TARGET",
             ),
         )
+        # The native app is built by a single `cmake --build` (ninja) command
+        # whose only SCons-declared deps are build.ninja and sdkconfig. Editing a
+        # source file changes neither, so without AlwaysBuild SCons treats the ELF
+        # as up-to-date and never invokes ninja -> silently stale firmware. ninja
+        # is itself incremental, so always running this command is cheap when
+        # nothing changed ("ninja: no work to do") and correct when it did.
+        AlwaysBuild(program)
     else:
         program = env.Program(env.subst("$PROGPATH"), env["PIOBUILDFILES"])
 
